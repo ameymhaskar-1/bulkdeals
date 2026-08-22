@@ -4,11 +4,10 @@ Streamlit Main Application Entry Point
 """
 
 import logging
-from datetime import date, datetime
+from datetime import date, timedelta
 from typing import Dict, Any, List
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 from nse_fetch import fetch_nse_deals
@@ -19,7 +18,6 @@ from excel_export import generate_excel_workbook
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Page configuration
 st.set_page_config(
     page_title="NSE & BSE Deals Tracker",
     page_icon="🏛️",
@@ -38,10 +36,6 @@ st.markdown("""
         border-left: 4px solid #0284c7;
         box-shadow: 0 1px 3px rgba(0,0,0,0.3);
     }
-    .metric-card-positive { border-left-color: #10b981 !important; }
-    .metric-card-negative { border-left-color: #ef4444 !important; }
-    .metric-title { font-size: 0.85rem; color: #94a3b8; font-weight: 600; text-transform: uppercase; }
-    .metric-value { font-size: 1.5rem; font-weight: 700; color: #f8fafc; }
     .status-badge {
         display: inline-block;
         padding: 4px 10px;
@@ -49,6 +43,7 @@ st.markdown("""
         font-size: 0.8rem;
         font-weight: 600;
         margin-right: 6px;
+        margin-bottom: 6px;
     }
     .badge-success { background-color: #064e3b; color: #6ee7b7; border: 1px solid #059669; }
     .badge-warning { background-color: #78350f; color: #fde68a; border: 1px solid #d97706; }
@@ -73,10 +68,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_all_deal_data(from_d: date, to_d: date):
     """
-    Parallel cached loader for NSE, BSE, and Historical Price enrichment.
+    Cached loader for NSE, BSE, and Historical Price enrichment.
     """
     nse_df, nse_status = fetch_nse_deals(from_d, to_d)
     bse_df, bse_status = fetch_bse_deals(from_d, to_d)
@@ -104,9 +99,7 @@ def load_all_deal_data(from_d: date, to_d: date):
 
 
 def compute_institutional_analytics(df: pd.DataFrame) -> Dict[str, Any]:
-    """
-    Computes executive metrics, observations, and rankings.
-    """
+    """Computes executive metrics, observations, and rankings."""
     stats: Dict[str, Any] = {}
     if df.empty:
         return stats
@@ -191,7 +184,7 @@ def main():
 
     if use_custom_date:
         col_d1, col_d2 = st.sidebar.columns(2)
-        from_date = col_d1.date_input("From", value=date.today() - pd.Timedelta(days=10))
+        from_date = col_d1.date_input("From", value=date.today() - timedelta(days=14))
         to_date = col_d2.date_input("To", value=date.today())
     else:
         from_date, to_date = get_trading_days_range(trading_days_opt)
@@ -211,13 +204,11 @@ def main():
     with st.spinner("Accessing official exchange records and price histories..."):
         deals_df, nse_status, bse_status, price_status, duplicates_removed = load_all_deal_data(from_date, to_date)
 
-    # Title & Header
     st.title("NSE & BSE Deals Tracker")
     st.caption("Investment Banking & Institutional Equities Transaction Intelligence")
 
     # Source Diagnostic Badges
     badge_html = "<div>"
-    # NSE badge
     if nse_status["status"] == "Loaded":
         badge_html += '<span class="status-badge badge-success">NSE: Loaded</span>'
     elif nse_status["status"] == "Warning":
@@ -225,7 +216,6 @@ def main():
     else:
         badge_html += '<span class="status-badge badge-danger">NSE: Failed</span>'
 
-    # BSE badge
     if bse_status["status"] == "Loaded":
         badge_html += '<span class="status-badge badge-success">BSE: Loaded</span>'
     elif bse_status["status"] == "Warning":
@@ -233,7 +223,6 @@ def main():
     else:
         badge_html += '<span class="status-badge badge-danger">BSE: Failed</span>'
 
-    # Price status
     if price_status["status"] == "Loaded":
         badge_html += '<span class="status-badge badge-success">Price Series: Enriched</span>'
     elif price_status["status"] == "Partial":
@@ -250,11 +239,11 @@ def main():
         st.warning(
             "Couldn't fetch data — NSE/BSE may be rate-limiting, the market may be closed, the selected period may "
             "contain no reported deals, or an exchange endpoint may have changed.\n\n"
-            "Try **Fetch Latest Data** again or check the official exchange reports."
+            "Try expanding the date window or clicking **Fetch Latest Data**."
         )
         return
 
-    # Apply Sidebar Table Filters
+    # Filter Data
     filtered_df = deals_df.copy()
     if exch_filter != "All":
         filtered_df = filtered_df[filtered_df["exchange"] == exch_filter]
@@ -265,10 +254,9 @@ def main():
     if client_search:
         filtered_df = filtered_df[filtered_df["client_name"].str.lower().str.contains(client_search, na=False)]
 
-    # Analytics
     stats = compute_institutional_analytics(filtered_df)
 
-    # 1. EXECUTIVE METRICS CARDS
+    # 1. Executive Metrics
     st.markdown('<div class="section-header">📊 Executive Deal Flow Summary</div>', unsafe_allow_html=True)
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Total Deals", f"{stats.get('total_deals', 0):,}")
@@ -279,13 +267,13 @@ def main():
     net_val = stats.get('net_buy_cr', 0.0)
     m6.metric("Net Buy / (Sell)", f"₹{net_val:,.1f} Cr", delta=f"{net_val:,.1f} Cr")
 
-    # 2. KEY DEAL FLOW OBSERVATIONS
+    # 2. Observations
     st.markdown('<div class="section-header">💡 Key Deal Flow Observations</div>', unsafe_allow_html=True)
     obs_list = stats.get("observations", [])
     obs_md = "<div class='obs-box'>" + "".join([f"<p style='margin-bottom: 6px;'>• <strong>{o}</strong></p>" for o in obs_list]) + "</div>"
     st.markdown(obs_md, unsafe_allow_html=True)
 
-    # Excel Download Button
+    # Excel Download
     excel_data = generate_excel_workbook(filtered_df, stats)
     st.download_button(
         label="📥 Download Institutional Excel Report (NSE_BSE_Deals_Tracker.xlsx)",
@@ -295,7 +283,7 @@ def main():
         use_container_width=True,
     )
 
-    # 3. INTERACTIVE CHARTS
+    # 3. Interactive Charts
     st.markdown('<div class="section-header">📈 Market Visualizations</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
 
@@ -330,45 +318,20 @@ def main():
         c2.plotly_chart(fig_client, use_container_width=True)
 
     c3, c4, c5 = st.columns(3)
-    # Exchange Split
-    fig_exch = px.pie(
-        filtered_df,
-        names="exchange",
-        values="deal_value_cr",
-        title="Exchange Distribution",
-        hole=0.45,
-        color_discrete_sequence=["#0284c7", "#f59e0b"],
-    )
+    fig_exch = px.pie(filtered_df, names="exchange", values="deal_value_cr", title="Exchange Distribution", hole=0.45, color_discrete_sequence=["#0284c7", "#f59e0b"])
     fig_exch.update_layout(template="plotly_dark", height=280)
     c3.plotly_chart(fig_exch, use_container_width=True)
 
-    # Deal Type Split
-    fig_dtype = px.pie(
-        filtered_df,
-        names="deal_type",
-        values="deal_value_cr",
-        title="Deal Type Distribution",
-        hole=0.45,
-        color_discrete_sequence=["#10b981", "#6366f1"],
-    )
+    fig_dtype = px.pie(filtered_df, names="deal_type", values="deal_value_cr", title="Deal Type Distribution", hole=0.45, color_discrete_sequence=["#10b981", "#6366f1"])
     fig_dtype.update_layout(template="plotly_dark", height=280)
     c4.plotly_chart(fig_dtype, use_container_width=True)
 
-    # Buy vs Sell
-    fig_bs = px.pie(
-        filtered_df,
-        names="buy_sell",
-        values="deal_value_cr",
-        title="Buy vs Sell Volume",
-        hole=0.45,
-        color_discrete_sequence=["#22c55e", "#ef4444"],
-    )
+    fig_bs = px.pie(filtered_df, names="buy_sell", values="deal_value_cr", title="Buy vs Sell Volume", hole=0.45, color_discrete_sequence=["#22c55e", "#ef4444"])
     fig_bs.update_layout(template="plotly_dark", height=280)
     c5.plotly_chart(fig_bs, use_container_width=True)
 
-    # 4. MAIN ENRICHED TRANSACTION TABLE
+    # 4. Main Ledger
     st.markdown('<div class="section-header">📋 Complete Deal Ledger with Historical Price Context</div>', unsafe_allow_html=True)
-    
     display_df = filtered_df[[
         "date", "exchange", "deal_type", "symbol", "security_name", "client_name",
         "buy_sell", "quantity", "price", "deal_value_cr", "deal_date_close",
@@ -394,7 +357,7 @@ def main():
         height=450
     )
 
-    # 5. AGGREGATE BREAKDOWNS
+    # 5. Tabbed Breakdowns
     tab1, tab2, tab3, tab4 = st.tabs(["Top Stocks", "Top Clients", "Repeat Activity", "Data Quality"])
 
     with tab1:
@@ -467,15 +430,6 @@ def main():
             "Min Deal Date": str(deals_df["date"].min()),
             "Max Deal Date": str(deals_df["date"].max()),
         })
-
-    # Institutional Disclaimers
-    with st.expander("ℹ️ Methodology, Data Sources & Regulatory Disclaimers"):
-        st.markdown("""
-        - **Data Ingestion**: Deal records are ingested from official NSE Large Deals and BSE Bulk/Block disclosures.
-        - **Historical Price Enrichment**: Closing prices are derived from daily official exchange closing quotes. Price changes (1D, 5D, 15D) are computed against actual preceding trading sessions (skipping weekends and market holidays).
-        - **Terminology Notice**: Premium/Discount is calculated strictly against Deal Date Market Close: `(Deal Price / Deal Date Close - 1) * 100`. Deal Price is the reported transaction rate and differs from the market closing quote.
-        - **Regulatory Disclaimer**: Bulk/Block transactions represent exchange disclosures of large trades and do not alone constitute investment intent or forward recommendations. Exchange interfaces may include unofficial/reverse-engineered endpoints and may change without notice. Verify data against official circulars before material capital deployment.
-        """)
 
 
 if __name__ == "__main__":
