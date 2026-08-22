@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 
 BSE_API_URL = "https://api.bseindia.com/BseIndiaAPI/api/BulkBlockDeal/w"
-BSE_REFERER_BULK = "https://www.bseindia.com/markets/equity/EQReports/bulk_deals.aspx"
 BSE_ORIGIN = "https://www.bseindia.com"
 
 BSE_HEADERS = {
@@ -27,7 +26,7 @@ BSE_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Origin": BSE_ORIGIN,
-    "Referer": BSE_REFERER_BULK,
+    "Referer": "https://www.bseindia.com/markets/equity/EQReports/bulk_deals.aspx",
     "Connection": "keep-alive",
 }
 
@@ -35,6 +34,184 @@ BSE_HEADERS = {
 def _parse_bse_number(val: Any) -> float:
     """Safely converts numeric or formatted string fields to float."""
     if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        s = str(val).replace(",", "").replace("₹", "").strip()
+        return float(s) if s else 0.0
+    except Exception:
+        return 0.0
+
+
+def _parse_bse_date(val: Any) -> Optional[date]:
+    """Converts diverse BSE date strings to date objects."""
+    if not val:
+        return None
+    val_str = str(val).strip()
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d-%b-%Y", "%Y%m%d"):
+        try:
+            return datetime.strptime(val_str, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def fetch_bse_endpoint(deal_type_param: str, from_date: date, to_date: date) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Safely queries the BSE BulkBlockDeal endpoint supporting multiple date format variations.
+    """
+    date_formats_to_try = [
+        (from_date.strftime("%Y%m%d"), to_date.strftime("%Y%m%d")),
+        (from_date.strftime("%d/%m/%Y"), to_date.strftime("%d/%m/%Y")),
+    ]
+
+    for f_str, t_str in date_formats_to_try:
+        params = {
+            "flag": "1",
+            "fdate": f_str,
+            "todate": t_str,
+            "scripcode": "",
+            "smcode": "",
+            "deal_type": deal_type_param,  # 'B' for Bulk, 'K' for Block
+        }
+
+        try:
+            resp = requests.get(BSE_API_URL, headers=BSE_HEADERS, params=params, timeout=12)
+            if resp.status_code == 200:
+                text = resp.text.strip()
+                if text and not text.startswith("<") and "html" not in resp.headers.get("Content-Type", "").lower():
+                    data = resp.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        return data, "OK"
+                    elif isinstance(data, dict):
+                        for k in ["Table", "Table1", "data", "Data"]:
+                            if k in data and isinstance(data[k], list) and len(data[k]) > 0:
+                                return data[k], "OK"
+        except Exception:
+            continue
+
+    return [], "BSE endpoint returned no records or was unreachable."
+
+
+def normalize_bse_records(raw_items: List[Dict[str, Any]], deal_type_label: str) -> List[Dict[str, Any]]:
+    """Standardizes raw BSE deals into the unified internal format."""
+    normalized = []
+    if not isinstance(raw_items, list):
+        return normalized
+
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+
+        symbol = str(
+            item.get("scrip_cd")
+            or item.get("SCRIP_CD")
+            or item.get("Scrip_CD")
+            or item.get("scrip_name")
+            or item.get("ScripName")
+            or ""
+        ).strip().upper()
+
+        sec_name = str(
+            item.get("scrip_name")
+            or item.get("ScripName")
+            or item.get("SCRIP_NAME")
+            or symbol
+        ).strip()
+
+        client = str(
+            item.get("client_name")
+            or item.get("Client_Name")
+            or item.get("CLIENT_NAME")
+            or item.get("clientName")
+            or ""
+        ).strip()
+
+        date_raw = (
+            item.get("deal_date")
+            or item.get("Deal_Date")
+            or item.get("DEAL_DATE")
+            or item.get("dt_tm")
+            or item.get("DATE")
+            or ""
+        )
+        deal_date = _parse_bse_date(date_raw)
+        if not deal_date:
+            deal_date = date.today()
+
+        action_raw = str(
+            item.get("deal_type")
+            or item.get("Deal_Type")
+            or item.get("trd_type")
+            or item.get("TRD_TYPE")
+            or item.get("buy_sell")
+            or ""
+        ).strip().upper()
+
+        if action_raw in ["B", "BUY", "PURCHASE"]:
+            buy_sell = "Buy"
+        elif action_raw in ["S", "SELL", "SALE"]:
+            buy_sell = "Sell"
+        else:
+            buy_sell = "Buy"
+
+        qty = _parse_bse_number(item.get("qty") or item.get("Qty") or item.get("QTY") or item.get("Quantity"))
+        price = _parse_bse_number(item.get("rate") or item.get("Rate") or item.get("RATE") or item.get("Price") or item.get("price"))
+
+        if qty <= 0 or price <= 0:
+            continue
+
+        deal_val = qty * price
+        deal_val_cr = deal_val / 10000000.0
+
+        normalized.append({
+            "exchange": "BSE",
+            "deal_type": deal_type_label,
+            "date": deal_date,
+            "symbol": symbol,
+            "security_name": sec_name if sec_name else symbol,
+            "client_name": client if client else "NOT SPECIFIED",
+            "buy_sell": buy_sell,
+            "quantity": qty,
+            "price": price,
+            "deal_value": deal_val,
+            "deal_value_cr": deal_val_cr,
+        })
+
+    return normalized
+
+
+def fetch_bse_deals(from_date: date, to_date: date) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Fetches Bulk ('B') and Block ('K') deals from BSE for the given date span.
+    """
+    status_info = {
+        "status": "Loaded",
+        "message": "BSE deals data loaded successfully.",
+        "raw_count": 0,
+        "cleaned_count": 0,
+    }
+
+    bulk_raw, _ = fetch_bse_endpoint("B", from_date, to_date)
+    block_raw, _ = fetch_bse_endpoint("K", from_date, to_date)
+
+    status_info["raw_count"] = len(bulk_raw) + len(block_raw)
+
+    bulk_norm = normalize_bse_records(bulk_raw, "Bulk")
+    block_norm = normalize_bse_records(block_raw, "Block")
+
+    all_deals = bulk_norm + block_norm
+
+    if not all_deals:
+        status_info["status"] = "Warning"
+        status_info["message"] = "No reported BSE Bulk/Block deals found for the requested period."
+        return pd.DataFrame(), status_info
+
+    df = pd.DataFrame(all_deals)
+    df = df[(df["date"] >= from_date) & (df["date"] <= to_date)]
+    status_info["cleaned_count"] = len(df)
+    return df, status_info    if val is None:
         return 0.0
     if isinstance(val, (int, float)):
         return float(val)
